@@ -4,74 +4,43 @@ import { OpenAI } from "openai";
 
 const app = express();
 app.use(express.json());
-
-// Configure CORS, set ALLOWED_ORIGINS in Railway Variables, comma separated
-const allowed = process.env.ALLOWED_ORIGINS?.split(",").map(s => s.trim()).filter(Boolean) || ["*"];
-app.use(cors({
-  origin: function(origin, cb) {
-    if (!origin || allowed.includes("*") || allowed.includes(origin)) return cb(null, true);
-    return cb(new Error("Origin not allowed by CORS"));
-  }
-}));
+app.use(cors());
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Optional schema to enforce integer output
-const avmSchema = {
-  name: "avm_integer_only",
-  schema: {
-    type: "object",
-    properties: {
-      value: { type: "integer", description: "Fair market value in USD as an integer" }
-    },
-    required: ["value"],
-    additionalProperties: false
-  },
-  strict: true
-};
+// Your exact prompt template
+const AVM_PROMPT_TEMPLATE =
+  "Act as an expert real estate AVM (Automated Valuation Model). Your task is to provide a highly accurate, up-to-date fair market value for the property at the following address. Methodology: 1. Property Lookup: First, identify the core attributes of the subject property from public records (e.g., Zillow, Redfin, county records). Key attributes include: living area square footage, bed/bath count, and lot size. 2. Comparable Sales: Second, find at least 3 recent comparable sales (comps) of similar properties sold within the last 12 months in the immediate neighborhood. 3. Market Adjustment: Third, adjust the valuation based on current local market trends and price per square foot. Do not use outdated tax assessments or old sale prices as the final value. 4. Final Estimate: Synthesize all data into a single estimated value. Your response must be a single integer representing the fair market value in USD. Do not include any text, dollar signs, or commas. Address: {address}";
 
-// Health check
-app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
-
-// Proxy endpoint
 app.post("/api/openai-proxy", async (req, res) => {
   try {
-    const { prompt, address } = req.body || {};
-    if (!prompt && !address) {
-      return res.status(400).json({ error: "Provide prompt or address" });
+    const { address } = req.body || {};
+    if (!address) {
+      return res.status(400).json({ error: "Address is required" });
     }
 
-    // If using your AVM pattern, build the instruction from address
-    const userInput = prompt ?? `Act as an expert real estate AVM. Output a single integer in USD. Address: ${address}`;
+    // Replace only the placeholder. The rest of the prompt remains identical.
+    const prompt = AVM_PROMPT_TEMPLATE.replace("{address}", address);
 
-    const response = await client.responses.create({
+    const resp = await client.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      system: "Return a JSON object with a single integer field named value, no extra commentary.",
-      input: userInput,
-      response_format: { type: "json_schema", json_schema: avmSchema }
+      input: prompt
     });
 
-    const text = response.output?.[0]?.content?.[0]?.text ?? null;
+    // Extract raw text
+    const text = resp.output?.[0]?.content?.[0]?.text ?? "";
 
-    let value = null;
-    try {
-      if (text) {
-        const parsed = JSON.parse(text);
-        value = Number.isInteger(parsed?.value) ? parsed.value : null;
-      }
-    } catch {
-      const digits = String(text || "").replace(/[^\d]/g, "");
-      value = digits ? parseInt(digits, 10) : null;
-    }
+    // Return integer if found, else null
+    const digits = text.replace(/[^\d]/g, "");
+    const value = digits ? parseInt(digits, 10) : null;
 
-    return res.status(200).json({ value });
+    return res.status(200).json({ value, raw: text });
   } catch (err) {
     const message = err?.response?.data || err?.message || "Unknown error";
     return res.status(200).json({ value: null, error: String(message) });
   }
 });
 
-// Port from env or default
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`openai-proxy listening on port ${PORT}`);
